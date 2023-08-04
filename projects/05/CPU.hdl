@@ -25,6 +25,40 @@
  * than to the address resulting from executing the current instruction. 
  */
 
+/* Breakdown of C-instruction bits
+ * |     | |---------| |---| |---|
+ * f e d c b a 9 8 7 6 5 4 3 2 1 0
+ * |     | | | | | | | | | | | | '- 0th LSB: jump condition >
+ * |     | | | | | | | | | | | '--- 1st LSB: jump condition ==
+ * |     | | | | | | | | | | '----- 2nd LSB: jump condition <
+ * |     | | | | | | | | | |
+ * |     | | | | | | | | | | ^---^ : jump condition bits
+ * |     | | | | | | | | | |
+ * |     | | | | | | | | | '- 3rd LSB: destination bit for M
+ * |     | | | | | | | | '--- 4th LSB: destination bit for D
+ * |     | | | | | | | '----- 5th LSB: destination bit for A
+ * |     | | | | | | |
+ * |     | | | | | | | ^---^ : destination control bits
+ * |     | | | | | | |
+ * |     | | | | | | '- 6th LSB:  ALU control bit zx
+ * |     | | | | | '--- 7th LSB:  ALU control bit nx
+ * |     | | | | '----- 8th LSB:  ALU control bit zy
+ * |     | | | '------- 9th LSB:  ALU control bit ny
+ * |     | | '--------- 10th LSB: ALU control bit f
+ * |     | '----------- 11th LSB: ALU control bit no
+ * |     |
+ * |     | ^---------^ : ALU control bits
+ * |     |
+ * |     '- 12th LSB: data register bit (A / M)
+ * |
+ * |     ^ : data register bit
+ * |
+ * '- 15th LSB: instruction type bit (A / C)
+ *
+ * ^ : instruction type bit
+ *
+ */
+
 CHIP CPU {
 
     IN  inM[16],         // M value input  (M = contents of RAM[A])
@@ -34,10 +68,67 @@ CHIP CPU {
                          // the current program (reset==0).
 
     OUT outM[16],        // M value output
-        writeM,          // Write to M? 
+        writeM,          // Write to M?
         addressM[15],    // Address in data memory (of M)
         pc[15];          // address of next instruction
 
     PARTS:
-    // Put your code here:
+    // Determine instruction and type: A / C
+    // Example:
+    // - A: @123 / @x    / @SP
+    // - C: D=M  / M=M+1 / 0;JMP
+    Mux16(a=instruction, b=aluOut, sel=instruction[15], out=ins);
+
+    // Feed instruction type into A
+    // Write into A if:
+    // - instruction is A-instruction OR
+    // - destination bit A is 1 (5th LSB)
+    Not(in=instruction[15], out=aIns);
+    Or(a=aIns, b=instruction[5], out=writeA);
+    ARegister(in=ins, load=writeA, out=A, out[0..14]=addressM);
+
+    // Decide whether to use A or M in comp(utation)
+    // Example:
+    // - A: D=A / A=A+1
+    // - M: D=M / M=M+1
+    // Depends on:
+    // - 12th LSB
+    Mux16(a=A, b=inM, sel=instruction[12], out=AorM);
+
+    // Write into D if:
+    // - instruction is C-instruction AND
+    // - destination bit D is 1 (4th LSB)
+    And(a=instruction[15], b=instruction[4], out=writeD);
+    DRegister(in=aluOut, load=writeD, out=D);
+
+    // Feed operands into ALU for C-instruction
+    // Example:
+    // - D=M+1: M
+    // - M=D:   D
+    // - M=M+D: M, D
+    ALU(x=D, y=AorM, zx=instruction[11], nx=instruction[10], zy=instruction[9], ny=instruction[8], f=instruction[7], no=instruction[6],zr=zr, ng=ng, out=aluOut, out=outM);
+
+    // Write into M if:
+    // - instruction is C-instruction AND
+    // - destination bit M is 1 (3rd LSB)
+    And(a=instruction[15], b=instruction[3], out=writeM);
+
+    // Fetch next instruction into PC following these rules:
+    //
+    // Reset address to 0 in PC if:
+    // - reset bit is 1
+    // Load address into PC if:
+    // - instruction is C-instruction AND
+    // - any jump condition is met
+    // Increment address in PC by default
+    And(a=zr, b=instruction[1], out=JEQ);
+    And(a=ng, b=instruction[2], out=JLT);
+    Not(in=zr, out=nonzero);
+    Not(in=ng, out=nonneg);
+    And(a=nonzero, b=nonneg, out=positive);
+    And(a=positive, b=instruction[0], out=JGT);
+    Or(a=JEQ, b=JLT, out=JLE);
+    Or(a=JGT, b=JLE, out=JMP);
+    And(a=JMP, b=instruction[15], out=writePC);
+    PC(in=A, load=writePC, inc=true, reset=reset, out[0..14]=pc);
 }
